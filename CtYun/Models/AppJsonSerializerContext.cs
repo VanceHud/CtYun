@@ -11,6 +11,16 @@ namespace CtYun
     //Aot编译需要
     [JsonSerializable(typeof(ConnecMessage))]
     [JsonSerializable(typeof(AppConfig))]
+    [JsonSerializable(typeof(AccountConfig))]
+    [JsonSerializable(typeof(StatusResponse))]
+    [JsonSerializable(typeof(AccountRuntimeState))]
+    [JsonSerializable(typeof(DesktopRuntimeState))]
+    [JsonSerializable(typeof(ServiceEvent))]
+    [JsonSerializable(typeof(AccountActionResult))]
+    [JsonSerializable(typeof(BindDeviceRequest))]
+    [JsonSerializable(typeof(ApiMessage))]
+    [JsonSerializable(typeof(List<AccountRuntimeState>))]
+    [JsonSerializable(typeof(List<ServiceEvent>))]
 
     [JsonSerializable(typeof(ResultBase<ChallengeData>))]
     [JsonSerializable(typeof(ResultBase<ClientInfo>))]

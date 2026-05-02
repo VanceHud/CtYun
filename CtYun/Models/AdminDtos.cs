@@ -1,0 +1,122 @@
+using System.Text.Json.Serialization;
+
+namespace CtYun.Models;
+
+public sealed class StatusResponse
+{
+    [JsonPropertyName("configured")]
+    public bool Configured { get; set; }
+
+    [JsonPropertyName("dataDir")]
+    public string DataDir { get; set; }
+
+    [JsonPropertyName("configPath")]
+    public string ConfigPath { get; set; }
+
+    [JsonPropertyName("keepAliveSeconds")]
+    public int KeepAliveSeconds { get; set; }
+
+    [JsonPropertyName("running")]
+    public bool Running { get; set; }
+
+    [JsonPropertyName("accounts")]
+    public List<AccountRuntimeState> Accounts { get; set; } = [];
+
+    [JsonPropertyName("events")]
+    public List<ServiceEvent> Events { get; set; } = [];
+}
+
+public sealed class AccountRuntimeState
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; }
+
+    [JsonPropertyName("user")]
+    public string User { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; }
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; }
+
+    [JsonPropertyName("desktopCount")]
+    public int DesktopCount { get; set; }
+
+    [JsonPropertyName("updatedAt")]
+    public DateTimeOffset UpdatedAt { get; set; }
+
+    [JsonPropertyName("desktops")]
+    public List<DesktopRuntimeState> Desktops { get; set; } = [];
+}
+
+public sealed class DesktopRuntimeState
+{
+    [JsonPropertyName("desktopId")]
+    public string DesktopId { get; set; }
+
+    [JsonPropertyName("desktopCode")]
+    public string DesktopCode { get; set; }
+
+    [JsonPropertyName("desktopName")]
+    public string DesktopName { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; }
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; }
+
+    [JsonPropertyName("updatedAt")]
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class ServiceEvent
+{
+    [JsonPropertyName("time")]
+    public DateTimeOffset Time { get; set; }
+
+    [JsonPropertyName("level")]
+    public string Level { get; set; }
+
+    [JsonPropertyName("scope")]
+    public string Scope { get; set; }
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; }
+}
+
+public sealed class AccountActionResult
+{
+    [JsonPropertyName("success")]
+    public bool Success { get; set; }
+
+    [JsonPropertyName("bondedDevice")]
+    public bool BondedDevice { get; set; }
+
+    [JsonPropertyName("smsSent")]
+    public bool SmsSent { get; set; }
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; }
+}
+
+public sealed class BindDeviceRequest
+{
+    [JsonPropertyName("account")]
+    public AccountConfig Account { get; set; }
+
+    [JsonPropertyName("code")]
+    public string Code { get; set; }
+}
+
+public sealed class ApiMessage
+{
+    public ApiMessage(string message)
+    {
+        Message = message;
+    }
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; }
+}
