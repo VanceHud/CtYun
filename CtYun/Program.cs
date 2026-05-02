@@ -1,5 +1,7 @@
 using CtYun;
 using CtYun.Models;
+using Microsoft.AspNetCore.HttpOverrides;
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 
@@ -19,11 +21,41 @@ builder.Services.AddSingleton<CtYunConfigStore>();
 builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<CtYunKeepAliveService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CtYunKeepAliveService>());
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedProto |
+        ForwardedHeaders.XForwardedHost;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 var app = builder.Build();
 
+app.UseForwardedHeaders();
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+    headers["Referrer-Policy"] = "no-referrer";
+    headers["X-Content-Type-Options"] = "nosniff";
+    headers["X-Frame-Options"] = "DENY";
+    await next();
+});
+app.UseHsts();
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.Use(async (context, next) =>
+{
+    if (NeedsCsrfProtection(context.Request) && !IsSafeBrowserWrite(context))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new ApiMessage("Unsafe cross-site request blocked."), AppJsonSerializerContext.Default.ApiMessage);
+        return;
+    }
+
+    await next();
+});
 app.Use(async (context, next) =>
 {
     if (!context.Request.Path.StartsWithSegments("/api") ||
@@ -55,11 +87,23 @@ app.MapGet("/api/auth/status", (HttpContext context, AdminAuthService auth) => R
 
 app.MapPost("/api/auth/login", IResult (AdminLoginRequest request, HttpContext context, AdminAuthService auth) =>
 {
+    if (auth.IsLoginLockedOut(context, out var retryAfter))
+    {
+        return LoginBlocked(context, retryAfter);
+    }
+
     if (!auth.VerifyPassword(request.Password))
     {
+        auth.RecordFailedLogin(context, out retryAfter);
+        if (retryAfter > TimeSpan.Zero)
+        {
+            return LoginBlocked(context, retryAfter);
+        }
+
         return Results.Unauthorized();
     }
 
+    auth.RecordSuccessfulLogin(context);
     auth.SignIn(context);
     return Results.Ok(new AdminAuthStatusResponse
     {
@@ -179,4 +223,86 @@ await app.RunAsync();
 static void ConfigureJson(JsonSerializerOptions options)
 {
     options.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
+}
+
+static IResult LoginBlocked(HttpContext context, TimeSpan retryAfter)
+{
+    var seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+    context.Response.Headers["Retry-After"] = seconds.ToString(CultureInfo.InvariantCulture);
+    return Results.Json(
+        new ApiMessage("Too many failed login attempts. Try again later."),
+        statusCode: StatusCodes.Status429TooManyRequests);
+}
+
+static bool NeedsCsrfProtection(HttpRequest request)
+{
+    if (!request.Path.StartsWithSegments("/api"))
+    {
+        return false;
+    }
+
+    return HttpMethods.IsPost(request.Method) ||
+           HttpMethods.IsPut(request.Method) ||
+           HttpMethods.IsPatch(request.Method) ||
+           HttpMethods.IsDelete(request.Method);
+}
+
+static bool IsSafeBrowserWrite(HttpContext context)
+{
+    if (!context.Request.Headers.TryGetValue("X-CtYun-CSRF", out var csrf) ||
+        !StringValuesContain(csrf, "1"))
+    {
+        return false;
+    }
+
+    return HasSameOrigin(context);
+}
+
+static bool HasSameOrigin(HttpContext context)
+{
+    var origin = context.Request.Headers["Origin"].ToString();
+    if (!string.IsNullOrWhiteSpace(origin))
+    {
+        return Uri.TryCreate(origin, UriKind.Absolute, out var originUri) &&
+               IsRequestOrigin(context.Request, originUri);
+    }
+
+    var referer = context.Request.Headers["Referer"].ToString();
+    if (!string.IsNullOrWhiteSpace(referer))
+    {
+        return Uri.TryCreate(referer, UriKind.Absolute, out var refererUri) &&
+               IsRequestOrigin(context.Request, refererUri);
+    }
+
+    return true;
+}
+
+static bool IsRequestOrigin(HttpRequest request, Uri uri)
+{
+    return string.Equals(request.Scheme, uri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(request.Host.Host, uri.Host, StringComparison.OrdinalIgnoreCase) &&
+           GetPort(request.Scheme, request.Host.Port) == GetPort(uri.Scheme, uri.IsDefaultPort ? null : uri.Port);
+}
+
+static int GetPort(string scheme, int? port)
+{
+    if (port.HasValue)
+    {
+        return port.Value;
+    }
+
+    return string.Equals(scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80;
+}
+
+static bool StringValuesContain(Microsoft.Extensions.Primitives.StringValues values, string expected)
+{
+    foreach (var value in values)
+    {
+        if (string.Equals(value, expected, StringComparison.Ordinal))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }

@@ -1,4 +1,5 @@
 using CtYun.Models;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -8,7 +9,15 @@ namespace CtYun;
 internal sealed class CtYunConfigStore
 {
     private const string PasswordMask = "********";
+    private const string ConfigEncryptionKeyEnvironmentVariable = "CTYUN_CONFIG_KEY";
+    private const string LocalConfigKeyFileName = "config-encryption.key";
+    private const string EncryptedConfigFormat = "ctyun-config-v1";
+    private const int AesGcmNonceSize = 12;
+    private const int AesGcmTagSize = 16;
     private readonly object _sync = new();
+    private readonly Dictionary<string, string> _generatedDeviceCodes = [];
+    private bool _loadedPlaintextConfig;
+    private bool _configNeedsSave;
     private AppConfig _config;
 
     public CtYunConfigStore()
@@ -28,6 +37,11 @@ internal sealed class CtYunConfigStore
         if (!File.Exists(ConfigPath) && _config.Accounts.Count > 0)
         {
             Save(_config);
+        }
+        else if (_loadedPlaintextConfig || _configNeedsSave)
+        {
+            Save(_config);
+            Utility.WriteLine(ConsoleColor.Yellow, "Migrated account config to encrypted storage.");
         }
     }
 
@@ -57,7 +71,7 @@ internal sealed class CtYunConfigStore
     public async Task SaveAsync(AppConfig config, CancellationToken ct)
     {
         var normalized = Normalize(config, keepExistingPasswords: true);
-        var json = JsonSerializer.Serialize(normalized, AppJsonSerializerContext.Default.AppConfig);
+        var json = SerializeConfigFile(normalized);
         var directory = Path.GetDirectoryName(ConfigPath);
         if (!string.IsNullOrWhiteSpace(directory))
         {
@@ -65,6 +79,7 @@ internal sealed class CtYunConfigStore
         }
 
         await File.WriteAllTextAsync(ConfigPath, json, ct);
+        SetOwnerOnlyFilePermissions(ConfigPath);
         lock (_sync)
         {
             _config = Clone(normalized);
@@ -105,16 +120,28 @@ internal sealed class CtYunConfigStore
             return account.DeviceCode.Trim();
         }
 
+        var deviceKey = SafeName(FirstNotEmpty(account.Name, account.User));
         var devicesDir = Path.Combine(DataDir, "devices");
-        Directory.CreateDirectory(devicesDir);
-        var deviceCodePath = Path.Combine(devicesDir, SafeName(FirstNotEmpty(account.Name, account.User)));
+        var deviceCodePath = Path.Combine(devicesDir, deviceKey);
         deviceCodePath = Path.ChangeExtension(deviceCodePath, ".txt");
-        if (!File.Exists(deviceCodePath))
+        if (File.Exists(deviceCodePath))
         {
-            File.WriteAllText(deviceCodePath, "web_" + GenerateRandomString(32));
+            SetOwnerOnlyFilePermissions(deviceCodePath);
+            _configNeedsSave = true;
+            return File.ReadAllText(deviceCodePath).Trim();
         }
 
-        return File.ReadAllText(deviceCodePath).Trim();
+        lock (_sync)
+        {
+            if (!_generatedDeviceCodes.TryGetValue(deviceKey, out var deviceCode))
+            {
+                deviceCode = "web_" + GenerateRandomString(32);
+                _generatedDeviceCodes[deviceKey] = deviceCode;
+                _configNeedsSave = true;
+            }
+
+            return deviceCode;
+        }
     }
 
     private AccountConfig NormalizeAccount(AccountConfig account, bool keepExistingPassword, AppConfig existingConfig)
@@ -154,7 +181,7 @@ internal sealed class CtYunConfigStore
         try
         {
             var json = File.ReadAllText(ConfigPath);
-            var config = JsonSerializer.Deserialize(json, AppJsonSerializerContext.Default.AppConfig);
+            var config = DeserializeConfigFile(json);
             Utility.WriteLine(ConsoleColor.Green, $"已读取配置文件：{ConfigPath}");
             return config;
         }
@@ -191,8 +218,139 @@ internal sealed class CtYunConfigStore
 
     private void Save(AppConfig config)
     {
-        var json = JsonSerializer.Serialize(config, AppJsonSerializerContext.Default.AppConfig);
+        var json = SerializeConfigFile(config);
         File.WriteAllText(ConfigPath, json);
+        SetOwnerOnlyFilePermissions(ConfigPath);
+    }
+
+    private string SerializeConfigFile(AppConfig config)
+    {
+        var plaintext = JsonSerializer.SerializeToUtf8Bytes(config, AppJsonSerializerContext.Default.AppConfig);
+        var key = GetConfigEncryptionKey();
+        var nonce = RandomNumberGenerator.GetBytes(AesGcmNonceSize);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[AesGcmTagSize];
+
+        using var aes = new AesGcm(key, AesGcmTagSize);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag, Encoding.UTF8.GetBytes(EncryptedConfigFormat));
+        CryptographicOperations.ZeroMemory(plaintext);
+
+        var encrypted = new EncryptedConfigFile
+        {
+            Format = EncryptedConfigFormat,
+            Algorithm = "AES-256-GCM",
+            Nonce = Convert.ToBase64String(nonce),
+            Tag = Convert.ToBase64String(tag),
+            Ciphertext = Convert.ToBase64String(ciphertext)
+        };
+
+        return JsonSerializer.Serialize(encrypted, AppJsonSerializerContext.Default.EncryptedConfigFile);
+    }
+
+    private AppConfig DeserializeConfigFile(string json)
+    {
+        try
+        {
+            var encrypted = JsonSerializer.Deserialize(json, AppJsonSerializerContext.Default.EncryptedConfigFile);
+            if (IsEncryptedConfig(encrypted))
+            {
+                _loadedPlaintextConfig = false;
+                return DecryptConfig(encrypted);
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        _loadedPlaintextConfig = true;
+        return JsonSerializer.Deserialize(json, AppJsonSerializerContext.Default.AppConfig);
+    }
+
+    private AppConfig DecryptConfig(EncryptedConfigFile encrypted)
+    {
+        var key = GetConfigEncryptionKey();
+        var nonce = Convert.FromBase64String(encrypted.Nonce);
+        var tag = Convert.FromBase64String(encrypted.Tag);
+        var ciphertext = Convert.FromBase64String(encrypted.Ciphertext);
+        var plaintext = new byte[ciphertext.Length];
+
+        using var aes = new AesGcm(key, AesGcmTagSize);
+        aes.Decrypt(nonce, ciphertext, tag, plaintext, Encoding.UTF8.GetBytes(EncryptedConfigFormat));
+
+        try
+        {
+            return JsonSerializer.Deserialize(plaintext, AppJsonSerializerContext.Default.AppConfig);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    private static bool IsEncryptedConfig(EncryptedConfigFile encrypted)
+    {
+        return encrypted != null &&
+               string.Equals(encrypted.Format, EncryptedConfigFormat, StringComparison.Ordinal) &&
+               string.Equals(encrypted.Algorithm, "AES-256-GCM", StringComparison.OrdinalIgnoreCase) &&
+               !string.IsNullOrWhiteSpace(encrypted.Nonce) &&
+               !string.IsNullOrWhiteSpace(encrypted.Tag) &&
+               !string.IsNullOrWhiteSpace(encrypted.Ciphertext);
+    }
+
+    private byte[] GetConfigEncryptionKey()
+    {
+        var configuredKey = Environment.GetEnvironmentVariable(ConfigEncryptionKeyEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(configuredKey))
+        {
+            return DeriveKey(configuredKey);
+        }
+
+        var keyPath = Path.Combine(DataDir, LocalConfigKeyFileName);
+        if (File.Exists(keyPath))
+        {
+            return Convert.FromBase64String(File.ReadAllText(keyPath).Trim());
+        }
+
+        var key = RandomNumberGenerator.GetBytes(32);
+        File.WriteAllText(keyPath, Convert.ToBase64String(key));
+        SetOwnerOnlyFilePermissions(keyPath);
+        Utility.WriteLine(ConsoleColor.Yellow, $"Created local config encryption key: {keyPath}");
+        return key;
+    }
+
+    private static byte[] DeriveKey(string value)
+    {
+        var trimmed = value.Trim();
+        try
+        {
+            var decoded = Convert.FromBase64String(trimmed);
+            if (decoded.Length == 32)
+            {
+                return decoded;
+            }
+        }
+        catch (FormatException)
+        {
+        }
+
+        return SHA256.HashData(Encoding.UTF8.GetBytes(trimmed));
+    }
+
+    private static void SetOwnerOnlyFilePermissions(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Utility.WriteLine(ConsoleColor.Yellow, $"Could not restrict file permissions for {path}: {ex.Message}");
+        }
     }
 
     private static AccountConfig FindExistingAccount(AppConfig config, string name, string user)

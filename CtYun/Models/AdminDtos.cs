@@ -159,3 +159,21 @@ public sealed class AdminChangePasswordRequest
     [JsonPropertyName("newPassword")]
     public string NewPassword { get; set; }
 }
+
+public sealed class EncryptedConfigFile
+{
+    [JsonPropertyName("format")]
+    public string Format { get; set; }
+
+    [JsonPropertyName("algorithm")]
+    public string Algorithm { get; set; }
+
+    [JsonPropertyName("nonce")]
+    public string Nonce { get; set; }
+
+    [JsonPropertyName("tag")]
+    public string Tag { get; set; }
+
+    [JsonPropertyName("ciphertext")]
+    public string Ciphertext { get; set; }
+}

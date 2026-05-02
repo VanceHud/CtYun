@@ -9,10 +9,14 @@ internal sealed class AdminAuthService
 {
     public const string DefaultInitialPassword = "admin123";
     private const string SessionCookieName = "ctyun_admin_session";
+    private const int MaxFailedAttempts = 5;
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
+    private static readonly TimeSpan FailedAttemptWindow = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan LoginLockoutDuration = TimeSpan.FromMinutes(10);
 
     private readonly object _sync = new();
     private readonly Dictionary<string, AdminSession> _sessions = [];
+    private readonly Dictionary<string, LoginFailureState> _failedLogins = [];
     private AdminCredentialFile _credential;
 
     public AdminAuthService(CtYunConfigStore configStore)
@@ -66,6 +70,75 @@ internal sealed class AdminAuthService
         catch
         {
             return false;
+        }
+    }
+
+    public bool IsLoginLockedOut(HttpContext context, out TimeSpan retryAfter)
+    {
+        var key = GetClientKey(context);
+        var now = DateTimeOffset.UtcNow;
+
+        lock (_sync)
+        {
+            if (!_failedLogins.TryGetValue(key, out var state))
+            {
+                retryAfter = TimeSpan.Zero;
+                return false;
+            }
+
+            if (state.LockedUntil is { } lockedUntil)
+            {
+                if (lockedUntil > now)
+                {
+                    retryAfter = lockedUntil - now;
+                    return true;
+                }
+
+                _failedLogins.Remove(key);
+            }
+        }
+
+        retryAfter = TimeSpan.Zero;
+        return false;
+    }
+
+    public void RecordFailedLogin(HttpContext context, out TimeSpan retryAfter)
+    {
+        var key = GetClientKey(context);
+        var now = DateTimeOffset.UtcNow;
+
+        lock (_sync)
+        {
+            if (!_failedLogins.TryGetValue(key, out var state) ||
+                now - state.FirstFailedAt > FailedAttemptWindow)
+            {
+                state = new LoginFailureState
+                {
+                    FirstFailedAt = now
+                };
+                _failedLogins[key] = state;
+            }
+
+            state.Attempts++;
+            state.LastFailedAt = now;
+
+            if (state.Attempts >= MaxFailedAttempts)
+            {
+                state.LockedUntil = now.Add(LoginLockoutDuration);
+                retryAfter = LoginLockoutDuration;
+                return;
+            }
+        }
+
+        retryAfter = TimeSpan.Zero;
+    }
+
+    public void RecordSuccessfulLogin(HttpContext context)
+    {
+        var key = GetClientKey(context);
+        lock (_sync)
+        {
+            _failedLogins.Remove(key);
         }
     }
 
@@ -238,8 +311,24 @@ internal sealed class AdminAuthService
             .TrimEnd('=');
     }
 
+    private static string GetClientKey(HttpContext context)
+    {
+        return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    }
+
     private sealed class AdminSession
     {
         public DateTimeOffset ExpiresAt { get; set; }
+    }
+
+    private sealed class LoginFailureState
+    {
+        public int Attempts { get; set; }
+
+        public DateTimeOffset FirstFailedAt { get; set; }
+
+        public DateTimeOffset LastFailedAt { get; set; }
+
+        public DateTimeOffset? LockedUntil { get; set; }
     }
 }

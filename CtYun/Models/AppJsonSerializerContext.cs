@@ -23,6 +23,7 @@ namespace CtYun
     [JsonSerializable(typeof(AdminAuthStatusResponse))]
     [JsonSerializable(typeof(AdminLoginRequest))]
     [JsonSerializable(typeof(AdminChangePasswordRequest))]
+    [JsonSerializable(typeof(EncryptedConfigFile))]
     [JsonSerializable(typeof(List<AccountRuntimeState>))]
     [JsonSerializable(typeof(List<ServiceEvent>))]
 

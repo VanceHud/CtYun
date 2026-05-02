@@ -77,13 +77,15 @@ docker run -d --name ctyun -p 8080:8080 -v ctyun-data:/app/data ctyun:local
 
 - `CTYUN_DATA_DIR`：数据目录，Docker 默认 `/app/data`。
 - `CTYUN_CONFIG`：配置文件完整路径。
+- `CTYUN_CONFIG_KEY`：账号配置加密密钥。可填写 32 字节 Base64 值；未设置时会在数据目录生成 `config-encryption.key`。
 - `ADMIN_INITIAL_PASSWORD`：管理员后台初始密码，默认 `admin123`；首次登录后会强制修改。
 - `APP_USER` / `APP_PASSWORD` / `APP_NAME` / `DEVICECODE`：兼容旧版单账号环境变量，首次启动时会迁移为后台配置。
 
 管理员密码哈希保存到数据目录的 `admin-auth.json`，请和 `/app/data` 一起持久化保存。
 如果忘记管理员密码，可以停止服务后删除该文件并重启，系统会重新生成初始密码并再次要求首次修改。
+账号配置会以 AES-256-GCM 写入 `accounts.json`；旧版明文配置会在启动时自动迁移。请妥善保存 `CTYUN_CONFIG_KEY` 或数据目录中的 `config-encryption.key`，丢失后将无法解密已保存的账号配置。
 
-`accounts.json` 示例：
+手动初始化时仍可使用旧版明文 `accounts.json`，程序首次启动后会自动迁移为加密格式。明文示例：
 
 ```json
 {
@@ -99,7 +101,7 @@ docker run -d --name ctyun -p 8080:8080 -v ctyun-data:/app/data ctyun:local
 }
 ```
 
-`deviceCode` 可不填。程序会为每个账号自动生成设备码，并保存到 `devices/{账号名}.txt`。
+`deviceCode` 可不填。程序会为每个账号自动生成设备码，并随账号配置一起加密保存。旧版本生成的 `devices/{账号名}.txt` 仍会被兼容读取并迁移。
 
 ## 接口
 
