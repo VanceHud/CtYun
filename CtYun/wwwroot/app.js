@@ -1,7 +1,9 @@
 const state = {
+  auth: { authenticated: false, mustChangePassword: true },
   config: { keepAliveSeconds: 60, accounts: [] },
   status: null,
   toastTimer: null,
+  pollingTimer: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -19,9 +21,12 @@ navItems.forEach((item) => {
   });
 });
 
+$("#login-form").addEventListener("submit", login);
+$("#change-password-form").addEventListener("submit", changePassword);
+$("#logout-btn").addEventListener("click", logout);
 $("#refresh-btn").addEventListener("click", () => loadAll());
-$("#restart-btn").addEventListener("click", () => postAction("/api/service/restart", "保活服务已重启"));
-$("#stop-btn").addEventListener("click", () => postAction("/api/service/stop", "保活服务已停止"));
+$("#restart-btn").addEventListener("click", () => postAction("/api/service/restart", "保活服务已重启。"));
+$("#stop-btn").addEventListener("click", () => postAction("/api/service/stop", "保活服务已停止。"));
 $("#add-account-btn").addEventListener("click", () => {
   state.config.accounts.push({ name: "", user: "", password: "", deviceCode: "" });
   renderConfig();
@@ -39,6 +44,82 @@ $("#config-form").addEventListener("submit", async (event) => {
   await loadStatus();
   showToast("配置已保存，保活服务正在使用最新配置。");
 });
+
+async function init() {
+  await loadAuthStatus();
+  renderAuthGate();
+
+  if (canUseConsole()) {
+    await loadAll();
+    startPolling();
+  }
+}
+
+async function loadAuthStatus() {
+  state.auth = await request("/api/auth/status", {}, { skipAuthRedirect: true, silent: true });
+}
+
+async function login(event) {
+  event.preventDefault();
+  const password = $("#admin-password").value;
+
+  try {
+    state.auth = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }, { skipAuthRedirect: true });
+    $("#admin-password").value = "";
+    renderAuthGate();
+
+    if (state.auth.mustChangePassword) {
+      $("#current-admin-password").value = password;
+      $("#new-admin-password").focus();
+      showToast("首次登录需要先修改管理员密码。");
+      return;
+    }
+
+    await loadAll();
+    startPolling();
+  } catch {
+    $("#admin-password").focus();
+  }
+}
+
+async function changePassword(event) {
+  event.preventDefault();
+  const currentPassword = $("#current-admin-password").value;
+  const newPassword = $("#new-admin-password").value;
+  const confirmPassword = $("#confirm-admin-password").value;
+
+  if (newPassword !== confirmPassword) {
+    showToast("两次输入的新密码不一致。");
+    $("#confirm-admin-password").focus();
+    return;
+  }
+
+  const result = await request("/api/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  }, { skipAuthRedirect: true });
+
+  $("#current-admin-password").value = "";
+  $("#new-admin-password").value = "";
+  $("#confirm-admin-password").value = "";
+  await loadAuthStatus();
+  renderAuthGate();
+  await loadAll();
+  startPolling();
+  showToast(result.message || "管理员密码已更新。");
+}
+
+async function logout() {
+  await request("/api/auth/logout", { method: "POST" }, { skipAuthRedirect: true, silent: true });
+  stopPolling();
+  state.auth = { authenticated: false, mustChangePassword: false };
+  state.status = null;
+  renderAuthGate();
+  showToast("已退出登录。");
+}
 
 async function loadAll() {
   await Promise.all([loadConfig(), loadStatus()]);
@@ -58,6 +139,43 @@ async function postAction(url, message) {
   await request(url, { method: "POST" });
   await loadStatus();
   showToast(message);
+}
+
+function renderAuthGate() {
+  const authScreen = $("#auth-screen");
+  const shell = $("#app-shell");
+  const loginPanel = $("#login-panel");
+  const changePanel = $("#change-password-panel");
+  const needsPasswordChange = state.auth.authenticated && state.auth.mustChangePassword;
+
+  authScreen.hidden = canUseConsole();
+  shell.hidden = !canUseConsole();
+  loginPanel.hidden = state.auth.authenticated;
+  changePanel.hidden = !needsPasswordChange;
+
+  if (!state.auth.authenticated) {
+    $("#admin-password").focus();
+  }
+}
+
+function canUseConsole() {
+  return state.auth.authenticated && !state.auth.mustChangePassword;
+}
+
+function startPolling() {
+  stopPolling();
+  state.pollingTimer = setInterval(() => {
+    if (canUseConsole()) {
+      loadStatus().catch(() => {});
+    }
+  }, 5000);
+}
+
+function stopPolling() {
+  if (state.pollingTimer) {
+    clearInterval(state.pollingTimer);
+    state.pollingTimer = null;
+  }
 }
 
 function renderConfig() {
@@ -229,9 +347,10 @@ function getInput(node, field) {
   return input ? input.value.trim() : "";
 }
 
-async function request(url, options = {}) {
+async function request(url, options = {}, behavior = {}) {
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
 
@@ -242,12 +361,29 @@ async function request(url, options = {}) {
   }
 
   if (!response.ok) {
-    const message = payload?.message || `请求失败：${response.status}`;
-    showToast(message);
+    const message = payload?.message || messageForStatus(response.status);
+    if (!behavior.skipAuthRedirect && (response.status === 401 || response.status === 403)) {
+      stopPolling();
+      state.auth = {
+        authenticated: response.status === 403,
+        mustChangePassword: response.status === 403,
+      };
+      renderAuthGate();
+    }
+
+    if (!behavior.silent) {
+      showToast(message);
+    }
     throw new Error(message);
   }
 
   return payload;
+}
+
+function messageForStatus(status) {
+  if (status === 401) return "管理员密码错误或登录已过期。";
+  if (status === 403) return "首次登录必须先修改管理员密码。";
+  return `请求失败：${status}`;
 }
 
 function emptyState(message) {
@@ -292,5 +428,4 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-loadAll().catch((error) => showToast(error.message));
-setInterval(() => loadStatus().catch(() => {}), 5000);
+init().catch((error) => showToast(error.message));

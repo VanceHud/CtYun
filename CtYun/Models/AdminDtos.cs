@@ -120,3 +120,42 @@ public sealed class ApiMessage
     [JsonPropertyName("message")]
     public string Message { get; set; }
 }
+
+public sealed class AdminCredentialFile
+{
+    [JsonPropertyName("passwordSalt")]
+    public string PasswordSalt { get; set; }
+
+    [JsonPropertyName("passwordHash")]
+    public string PasswordHash { get; set; }
+
+    [JsonPropertyName("mustChangePassword")]
+    public bool MustChangePassword { get; set; }
+
+    [JsonPropertyName("updatedAt")]
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class AdminAuthStatusResponse
+{
+    [JsonPropertyName("authenticated")]
+    public bool Authenticated { get; set; }
+
+    [JsonPropertyName("mustChangePassword")]
+    public bool MustChangePassword { get; set; }
+}
+
+public sealed class AdminLoginRequest
+{
+    [JsonPropertyName("password")]
+    public string Password { get; set; }
+}
+
+public sealed class AdminChangePasswordRequest
+{
+    [JsonPropertyName("currentPassword")]
+    public string CurrentPassword { get; set; }
+
+    [JsonPropertyName("newPassword")]
+    public string NewPassword { get; set; }
+}

@@ -16,6 +16,7 @@ if (string.IsNullOrWhiteSpace(urls))
 builder.WebHost.UseUrls(urls);
 builder.Services.ConfigureHttpJsonOptions(options => ConfigureJson(options.SerializerOptions));
 builder.Services.AddSingleton<CtYunConfigStore>();
+builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<CtYunKeepAliveService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CtYunKeepAliveService>());
 
@@ -23,6 +24,71 @@ var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/api") ||
+        context.Request.Path.StartsWithSegments("/api/auth"))
+    {
+        await next();
+        return;
+    }
+
+    var auth = context.RequestServices.GetRequiredService<AdminAuthService>();
+    if (!auth.TryGetSession(context, out var mustChangePassword))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new ApiMessage("请先登录管理员后台。"), AppJsonSerializerContext.Default.ApiMessage);
+        return;
+    }
+
+    if (mustChangePassword)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new ApiMessage("首次登录必须先修改管理员密码。"), AppJsonSerializerContext.Default.ApiMessage);
+        return;
+    }
+
+    await next();
+});
+
+app.MapGet("/api/auth/status", (HttpContext context, AdminAuthService auth) => Results.Ok(auth.GetStatus(context)));
+
+app.MapPost("/api/auth/login", IResult (AdminLoginRequest request, HttpContext context, AdminAuthService auth) =>
+{
+    if (!auth.VerifyPassword(request.Password))
+    {
+        return Results.Unauthorized();
+    }
+
+    auth.SignIn(context);
+    return Results.Ok(new AdminAuthStatusResponse
+    {
+        Authenticated = true,
+        MustChangePassword = auth.MustChangePassword
+    });
+});
+
+app.MapPost("/api/auth/change-password", IResult (AdminChangePasswordRequest request, HttpContext context, AdminAuthService auth) =>
+{
+    if (!auth.TryGetSession(context, out _))
+    {
+        return Results.Unauthorized();
+    }
+
+    if (!auth.TryChangePassword(request.CurrentPassword, request.NewPassword, out var message))
+    {
+        return Results.BadRequest(new ApiMessage(message));
+    }
+
+    auth.SignIn(context);
+    return Results.Ok(new ApiMessage(message));
+});
+
+app.MapPost("/api/auth/logout", IResult (HttpContext context, AdminAuthService auth) =>
+{
+    auth.SignOut(context);
+    return Results.Ok(new ApiMessage("已退出登录。"));
+});
 
 app.MapGet("/api/status", (CtYunConfigStore store, CtYunKeepAliveService service) => Results.Ok(new StatusResponse
 {

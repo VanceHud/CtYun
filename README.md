@@ -35,10 +35,11 @@ http://localhost:8080
 
 在后台完成以下步骤：
 
-1. 打开“账号配置”，填写账号、密码，设备码可留空。
-2. 点击“保存并重启”。
-3. 如果状态提示设备未绑定，点击“发送短信”，收到验证码后输入并点击“绑定设备”。
-4. 绑定成功后服务会重新加载配置并开始保活。
+1. 使用初始管理员密码 `admin123` 登录，按页面提示先修改密码。
+2. 打开“账号配置”，填写账号、密码，设备码可留空。
+3. 点击“保存并重启”。
+4. 如果状态提示设备未绑定，点击“发送短信”，收到验证码后输入并点击“绑定设备”。
+5. 绑定成功后服务会重新加载配置并开始保活。
 
 ## Docker Run 部署
 
@@ -76,7 +77,11 @@ docker run -d --name ctyun -p 8080:8080 -v ctyun-data:/app/data ctyun:local
 
 - `CTYUN_DATA_DIR`：数据目录，Docker 默认 `/app/data`。
 - `CTYUN_CONFIG`：配置文件完整路径。
+- `ADMIN_INITIAL_PASSWORD`：管理员后台初始密码，默认 `admin123`；首次登录后会强制修改。
 - `APP_USER` / `APP_PASSWORD` / `APP_NAME` / `DEVICECODE`：兼容旧版单账号环境变量，首次启动时会迁移为后台配置。
+
+管理员密码哈希保存到数据目录的 `admin-auth.json`，请和 `/app/data` 一起持久化保存。
+如果忘记管理员密码，可以停止服务后删除该文件并重启，系统会重新生成初始密码并再次要求首次修改。
 
 `accounts.json` 示例：
 
@@ -100,6 +105,10 @@ docker run -d --name ctyun -p 8080:8080 -v ctyun-data:/app/data ctyun:local
 
 管理后台使用以下本地 API：
 
+- `GET /api/auth/status`：读取管理员登录状态。
+- `POST /api/auth/login`：管理员登录。
+- `POST /api/auth/change-password`：修改管理员密码。
+- `POST /api/auth/logout`：退出管理员登录。
 - `GET /api/status`：运行状态、账号状态、日志。
 - `GET /api/config`：读取脱敏配置。
 - `PUT /api/config`：保存配置并重启保活。
