@@ -279,9 +279,139 @@ static bool HasSameOrigin(HttpContext context)
 
 static bool IsRequestOrigin(HttpRequest request, Uri uri)
 {
-    return string.Equals(request.Scheme, uri.Scheme, StringComparison.OrdinalIgnoreCase) &&
-           string.Equals(request.Host.Host, uri.Host, StringComparison.OrdinalIgnoreCase) &&
-           GetPort(request.Scheme, request.Host.Port) == GetPort(uri.Scheme, uri.IsDefaultPort ? null : uri.Port);
+    if (IsSameOrigin(request.Scheme, request.Host.Host, request.Host.Port, uri))
+    {
+        return true;
+    }
+
+    foreach (var origin in GetForwardedOrigins(request))
+    {
+        if (IsForwardedOrigin(uri, origin.Scheme, origin.Host, origin.Port))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool IsSameOrigin(string scheme, string host, int? port, Uri uri)
+{
+    return string.Equals(scheme, uri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(host, uri.Host, StringComparison.OrdinalIgnoreCase) &&
+           GetPort(scheme, port) == GetPort(uri.Scheme, uri.IsDefaultPort ? null : uri.Port);
+}
+
+static bool IsForwardedOrigin(Uri requestOrigin, string scheme, string host, string port)
+{
+    if (string.IsNullOrWhiteSpace(scheme) || string.IsNullOrWhiteSpace(host))
+    {
+        return false;
+    }
+
+    var candidateHost = host;
+    if (!HasPort(candidateHost) &&
+        int.TryParse(port, NumberStyles.Integer, CultureInfo.InvariantCulture, out var forwardedPort))
+    {
+        candidateHost = candidateHost.StartsWith("[", StringComparison.Ordinal) || !candidateHost.Contains(':')
+            ? $"{candidateHost}:{forwardedPort}"
+            : $"[{candidateHost}]:{forwardedPort}";
+    }
+
+    return Uri.TryCreate($"{scheme}://{candidateHost}", UriKind.Absolute, out var forwardedUri) &&
+           IsSameOrigin(forwardedUri.Scheme, forwardedUri.Host, forwardedUri.IsDefaultPort ? null : forwardedUri.Port, requestOrigin);
+}
+
+static IEnumerable<(string Scheme, string Host, string Port)> GetForwardedOrigins(HttpRequest request)
+{
+    foreach (var forwarded in SplitHeaderValues(request.Headers["Forwarded"]))
+    {
+        var scheme = GetForwardedParameter(forwarded, "proto");
+        var host = GetForwardedParameter(forwarded, "host");
+        if (!string.IsNullOrWhiteSpace(host))
+        {
+            yield return (scheme ?? request.Scheme, host, null);
+        }
+    }
+
+    var forwardedHosts = SplitHeaderValues(request.Headers["X-Forwarded-Host"]);
+    if (forwardedHosts.Count == 0)
+    {
+        yield break;
+    }
+
+    var forwardedProtos = SplitHeaderValues(request.Headers["X-Forwarded-Proto"]);
+    var forwardedSchemes = SplitHeaderValues(request.Headers["X-Forwarded-Scheme"]);
+    var forwardedPorts = SplitHeaderValues(request.Headers["X-Forwarded-Port"]);
+
+    for (var i = 0; i < forwardedHosts.Count; i++)
+    {
+        var scheme = GetIndexedValue(forwardedProtos, i) ??
+                     GetIndexedValue(forwardedSchemes, i) ??
+                     request.Scheme;
+        yield return (scheme, forwardedHosts[i], GetIndexedValue(forwardedPorts, i));
+    }
+}
+
+static List<string> SplitHeaderValues(Microsoft.Extensions.Primitives.StringValues values)
+{
+    var result = new List<string>();
+    foreach (var value in values)
+    {
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var clean = TrimForwardedValue(part);
+            if (!string.IsNullOrWhiteSpace(clean))
+            {
+                result.Add(clean);
+            }
+        }
+    }
+
+    return result;
+}
+
+static string GetForwardedParameter(string forwarded, string name)
+{
+    foreach (var segment in forwarded.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var equalsIndex = segment.IndexOf('=');
+        if (equalsIndex <= 0)
+        {
+            continue;
+        }
+
+        var parameterName = segment[..equalsIndex].Trim();
+        if (string.Equals(parameterName, name, StringComparison.OrdinalIgnoreCase))
+        {
+            return TrimForwardedValue(segment[(equalsIndex + 1)..]);
+        }
+    }
+
+    return null;
+}
+
+static string GetIndexedValue(List<string> values, int index)
+{
+    if (values.Count == 0)
+    {
+        return null;
+    }
+
+    return index < values.Count ? values[index] : values[^1];
+}
+
+static string TrimForwardedValue(string value)
+{
+    value = value.Trim();
+    return value.Length >= 2 && value[0] == '"' && value[^1] == '"'
+        ? value[1..^1]
+        : value;
+}
+
+static bool HasPort(string host)
+{
+    return Uri.TryCreate($"http://{host}", UriKind.Absolute, out var uri) && !uri.IsDefaultPort;
 }
 
 static int GetPort(string scheme, int? port)
